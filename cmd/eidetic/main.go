@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ajejfiejof/eidetic/pkg/clipboard"
 	"github.com/ajejfiejof/eidetic/pkg/collectors"
 	"github.com/ajejfiejof/eidetic/pkg/config"
 	"github.com/ajejfiejof/eidetic/pkg/document"
@@ -18,24 +19,26 @@ import (
 	"github.com/ajejfiejof/eidetic/pkg/tui"
 )
 
-const version = "1.0.0"
+const version = "1.1.0"
 
 func printHelp() {
-	fmt.Printf(`eidetic - Sovereign Cognitive Index (v%s)
+	fmt.Printf(`eidetic - Sovereign Cognitive Index (v%s) 🧠
 Instant photographic recall across everything you've ever typed, copied, or read.
 
 USAGE:
   eidetic                          Launch interactive TUI search
   eidetic search <query>           Search from the command line
-  eidetic index                    Crawl and index shell history, clipboard, and notes
+  eidetic index                    Crawl and index shell history, clipboard, git, and notes
   eidetic add [text]               Add a snippet, note, or piped stdin
-  eidetic watch                    Run background daemon to watch clipboard & history
+  eidetic pin <id>                 Pin or unpin an item to keep it at the top
+  eidetic service <action>         Manage systemd daemon: install, uninstall, status
+  eidetic watch                    Run foreground clipboard watcher daemon
   eidetic stats                    Display database and index statistics
   eidetic init <bash|zsh|fish>     Generate shell integration hook (Ctrl+R replacement)
 
 OPTIONS:
   --query, -q <string>             Initial query for TUI or search
-  --source <shell|clipboard|file>  Filter search results by source
+  --source <shell|clip|file|git>   Filter search results by source
   --limit <int>                    Maximum results to return (default: 20)
   --version, -v                    Show version information
   --help, -h                       Show this help message
@@ -45,7 +48,7 @@ OPTIONS:
 func main() {
 	queryFlag := flag.String("query", "", "Search query")
 	flag.StringVar(queryFlag, "q", "", "Search query (shorthand)")
-	sourceFlag := flag.String("source", "", "Filter by source (shell, clipboard, file, note)")
+	sourceFlag := flag.String("source", "", "Filter by source (shell, clipboard, file, note, git)")
 	limitFlag := flag.Int("limit", 20, "Result limit")
 	verFlag := flag.Bool("version", false, "Show version")
 	flag.BoolVar(verFlag, "v", false, "Show version (shorthand)")
@@ -69,6 +72,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error loading configuration: %v\n", err)
 		os.Exit(1)
 	}
+
+	// Initialize visual theme (trans pride by default, or catppuccin / default)
+	tui.InitTheme(cfg.Theme)
 
 	storage, err := index.OpenStorage(cfg.DataDir)
 	if err != nil {
@@ -96,6 +102,27 @@ func main() {
 		}
 		fmt.Print(hook)
 
+	case "service":
+		if len(args) < 2 {
+			fmt.Println("Usage: eidetic service <install|uninstall|status>")
+			os.Exit(1)
+		}
+		handleService(args[1])
+
+	case "pin":
+		if len(args) < 2 {
+			fmt.Println("Usage: eidetic pin <doc_id>")
+			os.Exit(1)
+		}
+		pinned, err := engine.TogglePin(args[1])
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+		} else if pinned {
+			fmt.Printf("⭐ Pinned document: %s\n", args[1])
+		} else {
+			fmt.Printf("Unpinned document: %s\n", args[1])
+		}
+
 	case "stats":
 		showStats(engine, cfg)
 
@@ -109,16 +136,24 @@ func main() {
 		handleWatch(engine, cfg)
 
 	case "search":
-		searchQuery := strings.Join(args[1:], " ")
+		searchCmd := flag.NewFlagSet("search", flag.ExitOnError)
+		srcFlag := searchCmd.String("source", *sourceFlag, "Filter by source (shell, clipboard, file, note, git)")
+		lFlag := searchCmd.Int("limit", *limitFlag, "Result limit")
+		_ = searchCmd.Parse(args[1:])
+
+		searchQuery := strings.Join(searchCmd.Args(), " ")
 		if searchQuery == "" {
 			searchQuery = *queryFlag
 		}
-		handleSearch(engine, searchQuery, document.SourceType(*sourceFlag), *limitFlag)
+		src := document.SourceType(*srcFlag)
+		if src == "clip" {
+			src = document.SourceClipboard
+		}
+		handleSearch(engine, searchQuery, src, *lFlag)
 
 	default:
-		// Default: launch interactive TUI or run auto-index on first boot
 		if engine.Count() == 0 {
-			fmt.Println("⚡ First run detected: indexing shell history...")
+			fmt.Println("⚡ First run detected: indexing history and repositories...")
 			handleIndex(engine, cfg)
 		}
 
@@ -127,22 +162,49 @@ func main() {
 			initialQuery = strings.Join(args, " ")
 		}
 
-		selected, err := tui.RunTUI(engine, initialQuery)
+		selected, err := tui.RunTUI(engine, initialQuery, cfg.AutoCopy)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
 			os.Exit(1)
 		}
 		if selected != nil {
+			if cfg.AutoCopy {
+				_ = clipboard.Copy(selected.Content)
+			}
 			fmt.Print(selected.Content)
 		}
 	}
 }
 
+func handleService(action string) {
+	switch action {
+	case "install":
+		if err := integration.InstallService(); err != nil {
+			fmt.Printf("❌ Failed to install service: %v\n", err)
+		} else {
+			fmt.Println("✅ Systemd user service installed and started (eidetic.service)")
+		}
+	case "uninstall":
+		if err := integration.UninstallService(); err != nil {
+			fmt.Printf("❌ Failed to uninstall service: %v\n", err)
+		} else {
+			fmt.Println("✅ Systemd user service disabled and removed")
+		}
+	case "status":
+		fmt.Printf("Service status: %s\n", integration.ServiceStatus())
+	default:
+		fmt.Printf("Unknown service action: %s (choose install, uninstall, or status)\n", action)
+	}
+}
+
 func showStats(engine *index.Engine, cfg *config.Config) {
 	fmt.Println("================================================================================")
-	fmt.Println("  EIDETIC: SOVEREIGN COGNITIVE INDEX STATISTICS")
+	fmt.Println("  EIDETIC: SOVEREIGN COGNITIVE INDEX STATISTICS 🧠")
 	fmt.Println("================================================================================")
 	fmt.Printf("Database Path : %s/documents.jsonl\n", cfg.DataDir)
+	fmt.Printf("Theme Setting : %s\n", cfg.Theme)
+	fmt.Printf("Auto-Copy     : %v\n", cfg.AutoCopy)
+	fmt.Printf("Daemon Status : %s\n", integration.ServiceStatus())
 	fmt.Printf("Total Items   : %d\n", engine.Count())
 	fmt.Println("Breakdown by Source:")
 	counts := engine.SourceCounts()
@@ -160,13 +222,17 @@ func handleIndex(engine *index.Engine, cfg *config.Config) {
 	fmt.Println("📂 Crawling local notes and directories...")
 	fileDocs, _ := collectors.CollectFiles(cfg.WatchDirs, cfg.MaxDocSizeKB, cfg.IgnoreRules)
 
+	fmt.Println("📦 Indexing Git repositories...")
+	gitDocs, _ := collectors.CollectGitCommits(cfg.GitDirs, 25)
+
 	var clipDocs []document.Document
 	if clipText, err := collectors.ReadClipboard(); err == nil && len(clipText) > 4 {
 		clipDocs = append(clipDocs, document.NewDocument(document.SourceClipboard, clipText, "", time.Now()))
 	}
 
-	total := len(shellDocs) + len(fileDocs) + len(clipDocs)
+	total := len(shellDocs) + len(fileDocs) + len(gitDocs) + len(clipDocs)
 	all := append(shellDocs, fileDocs...)
+	all = append(all, gitDocs...)
 	all = append(all, clipDocs...)
 
 	_ = engine.IndexBatch(all)
@@ -184,7 +250,6 @@ func handleAdd(args []string, engine *index.Engine) {
 		content := strings.Join(args, " ")
 		doc = collectors.CollectSnippet(content, "", nil)
 	} else {
-		// Read from piped stdin
 		doc, err = collectors.CollectStdin("", nil)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error reading input: %v\n", err)
@@ -214,20 +279,28 @@ func handleSearch(engine *index.Engine, query string, source document.SourceType
 
 	fmt.Printf("Found %d matches in %.2fms:\n\n", len(results), float64(elapsed.Microseconds())/1000.0)
 	for i, r := range results {
-		fmt.Printf("[%2d] [%-6s] %s\n", i+1, r.Doc.Source, r.Doc.Title)
-		lines := strings.Split(r.Doc.Content, "\n")
-		for _, l := range lines {
-			if len(l) > 90 {
-				l = l[:87] + "..."
+		pinMarker := ""
+		if r.Doc.Pinned {
+			pinMarker = "⭐ "
+		}
+		fmt.Printf("[%2d] [%-6s] %s%s (ID: %s)\n", i+1, r.Doc.Source, pinMarker, r.Doc.Title, r.Doc.ID)
+		if r.Highlight != "" {
+			fmt.Printf("     Match: %s\n", r.Highlight)
+		} else {
+			lines := strings.Split(r.Doc.Content, "\n")
+			for _, l := range lines {
+				if len(l) > 90 {
+					l = l[:87] + "..."
+				}
+				fmt.Printf("     %s\n", l)
 			}
-			fmt.Printf("     %s\n", l)
 		}
 		fmt.Println()
 	}
 }
 
 func handleWatch(engine *index.Engine, cfg *config.Config) {
-	fmt.Println("🛡️  Eidetic daemon running: watching clipboard and system events...")
+	fmt.Println("🛡️  Eidetic daemon running: watching clipboard events...")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 

@@ -1,6 +1,7 @@
 package index
 
 import (
+	"fmt"
 	"math"
 	"sort"
 	"strings"
@@ -265,6 +266,11 @@ func (e *Engine) Search(query string, filter SearchFilter) []SearchResult {
 			score += 10.0
 		}
 
+		// Pinned items receive strong priority boost
+		if doc.Pinned {
+			score += 50.0
+		}
+
 		// Recency boost (fresher items get up to +2.0 boost)
 		daysOld := now.Sub(doc.Timestamp).Hours() / 24.0
 		if daysOld < 0 {
@@ -273,9 +279,13 @@ func (e *Engine) Search(query string, filter SearchFilter) []SearchResult {
 		recencyBoost := 2.0 / (1.0 + math.Log1p(daysOld))
 		score += recencyBoost
 
+		// Generate contextual highlight snippet
+		highlight := generateHighlight(doc.Content, queryTokens)
+
 		results = append(results, SearchResult{
-			Doc:   doc,
-			Score: score,
+			Doc:       doc,
+			Score:     score,
+			Highlight: highlight,
 		})
 	}
 
@@ -313,6 +323,9 @@ func (e *Engine) recentDocuments(filter SearchFilter) []SearchResult {
 	}
 
 	sort.Slice(list, func(i, j int) bool {
+		if list[i].Pinned != list[j].Pinned {
+			return list[i].Pinned
+		}
 		return list[i].Timestamp.After(list[j].Timestamp)
 	})
 
@@ -332,6 +345,58 @@ func (e *Engine) recentDocuments(filter SearchFilter) []SearchResult {
 		}
 	}
 	return results
+}
+
+// TogglePin toggles the pinned status of a document.
+func (e *Engine) TogglePin(docID string) (bool, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	doc, exists := e.docs[docID]
+	if !exists {
+		return false, fmt.Errorf("document not found: %s", docID)
+	}
+
+	doc.Pinned = !doc.Pinned
+	e.docs[docID] = doc
+
+	if e.storage != nil {
+		_ = e.storage.Append(doc)
+	}
+	return doc.Pinned, nil
+}
+
+func generateHighlight(content string, tokens []string) string {
+	contentLower := strings.ToLower(content)
+	firstPos := -1
+	matchedWord := ""
+
+	for _, t := range tokens {
+		pos := strings.Index(contentLower, t)
+		if pos != -1 && (firstPos == -1 || pos < firstPos) {
+			firstPos = pos
+			matchedWord = t
+		}
+	}
+
+	if firstPos == -1 {
+		if len(content) > 100 {
+			return content[:97] + "..."
+		}
+		return content
+	}
+
+	start := max(0, firstPos-30)
+	end := min(len(content), firstPos+len(matchedWord)+70)
+
+	snippet := content[start:end]
+	if start > 0 {
+		snippet = "..." + snippet
+	}
+	if end < len(content) {
+		snippet = snippet + "..."
+	}
+	return snippet
 }
 
 // Count returns total indexed documents.

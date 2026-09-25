@@ -16,6 +16,7 @@ const (
 	SourceFile      SourceType = "file"
 	SourceNote      SourceType = "note"
 	SourceStdin     SourceType = "stdin"
+	SourceGit       SourceType = "git"
 )
 
 // Document represents an indexed knowledge artifact with metadata.
@@ -25,6 +26,7 @@ type Document struct {
 	Source    SourceType        `json:"source"`
 	Title     string            `json:"title"`
 	Tags      []string          `json:"tags,omitempty"`
+	Pinned    bool              `json:"pinned,omitempty"`
 	Timestamp time.Time         `json:"timestamp"`
 	Metadata  map[string]string `json:"metadata,omitempty"`
 }

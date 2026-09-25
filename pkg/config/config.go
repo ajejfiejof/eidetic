@@ -10,9 +10,12 @@ import (
 type Config struct {
 	DataDir      string   `json:"data_dir"`
 	WatchDirs    []string `json:"watch_dirs"`
+	GitDirs      []string `json:"git_dirs"`
 	IgnoreRules  []string `json:"ignore_rules"`
 	MaxDocSizeKB int      `json:"max_doc_size_kb"`
 	MaxResults   int      `json:"max_results"`
+	Theme        string   `json:"theme"`
+	AutoCopy     bool     `json:"auto_copy"`
 }
 
 // DefaultConfig initializes sane defaults adhering to XDG standards.
@@ -30,6 +33,9 @@ func DefaultConfig() *Config {
 			filepath.Join(home, "Notes"),
 			filepath.Join(home, ".config"),
 		},
+		GitDirs: []string{
+			filepath.Join(home, "Projects"),
+		},
 		IgnoreRules: []string{
 			"node_modules",
 			".git",
@@ -41,6 +47,8 @@ func DefaultConfig() *Config {
 		},
 		MaxDocSizeKB: 512,
 		MaxResults:   50,
+		Theme:        "trans",
+		AutoCopy:     true,
 	}
 }
 

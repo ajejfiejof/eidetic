@@ -16,6 +16,7 @@ var filterCycle = []document.SourceType{
 	"",
 	document.SourceShell,
 	document.SourceClipboard,
+	document.SourceGit,
 	document.SourceFile,
 	document.SourceNote,
 }
@@ -33,14 +34,17 @@ type Model struct {
 	height        int
 	searchLatency time.Duration
 	cancelled     bool
+	autoCopy      bool
+	statusMsg     string
 }
 
 // NewModel creates an initial TUI model.
-func NewModel(engine *index.Engine, initialQuery string) Model {
+func NewModel(engine *index.Engine, initialQuery string, autoCopy bool) Model {
 	m := Model{
 		engine:       engine,
 		query:        initialQuery,
 		sourceFilter: "",
+		autoCopy:     autoCopy,
 	}
 	m.runSearch()
 	return m
@@ -82,6 +86,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.selectedDoc = &doc
 			}
 			return m, tea.Quit
+
+		case tea.KeyCtrlB:
+			if len(m.results) > 0 && m.selectedIndex < len(m.results) {
+				docID := m.results[m.selectedIndex].Doc.ID
+				pinned, err := m.engine.TogglePin(docID)
+				if err == nil {
+					m.results[m.selectedIndex].Doc.Pinned = pinned
+					m.runSearch()
+				}
+			}
+			return m, nil
 
 		case tea.KeyUp, tea.KeyCtrlK, tea.KeyCtrlP:
 			if m.selectedIndex > 0 {
@@ -142,6 +157,8 @@ func sourceBadge(src document.SourceType) string {
 		return StyleBadgeShell.Render("[SHELL]")
 	case document.SourceClipboard:
 		return StyleBadgeClip.Render("[CLIP ]")
+	case document.SourceGit:
+		return StyleBadgeGit.Render("[GIT  ]")
 	case document.SourceFile:
 		return StyleBadgeFile.Render("[FILE ]")
 	case document.SourceNote:
@@ -193,16 +210,20 @@ func (m Model) View() string {
 
 	for i := startIdx; i < endIdx; i++ {
 		res := m.results[i]
+		pinStr := ""
+		if res.Doc.Pinned {
+			pinStr = StyleBadgePinned.Render("⭐ ")
+		}
 		badgeStr := sourceBadge(res.Doc.Source)
 		timeStr := StyleMuted.Render(fmt.Sprintf("%8s", formatRelativeTime(res.Doc.Timestamp)))
 
 		titleText := res.Doc.Title
-		maxTitleLen := leftWidth - 22
+		maxTitleLen := leftWidth - 25
 		if maxTitleLen > 5 && len(titleText) > maxTitleLen {
 			titleText = titleText[:maxTitleLen-3] + "..."
 		}
 
-		line := fmt.Sprintf("%s %s %s", badgeStr, timeStr, titleText)
+		line := fmt.Sprintf("%s%s %s %s", pinStr, badgeStr, timeStr, titleText)
 		if i == m.selectedIndex {
 			line = StyleSelectedRow.Width(leftWidth).Render("> " + line)
 		} else {
@@ -221,11 +242,17 @@ func (m Model) View() string {
 	if len(m.results) > 0 && m.selectedIndex < len(m.results) {
 		selected := m.results[m.selectedIndex].Doc
 		metaLines := []string{
-			lipgloss.NewStyle().Bold(true).Foreground(ColorWhite).Render(selected.Title),
+			lipgloss.NewStyle().Bold(true).Foreground(CurrentTheme.White).Render(selected.Title),
 			StyleMuted.Render(fmt.Sprintf("Source: %s | Time: %s", selected.Source, selected.Timestamp.Format("2006-01-02 15:04:05"))),
+		}
+		if selected.Pinned {
+			metaLines = append(metaLines, StyleBadgePinned.Render("⭐ Pinned to Top"))
 		}
 		if p, ok := selected.Metadata["path"]; ok {
 			metaLines = append(metaLines, StyleMuted.Render("Path: "+p))
+		}
+		if r, ok := selected.Metadata["repo"]; ok {
+			metaLines = append(metaLines, StyleMuted.Render("Repo: "+r))
 		}
 		metaLines = append(metaLines, strings.Repeat("─", rightWidth-4))
 
@@ -247,14 +274,14 @@ func (m Model) View() string {
 		rightPane = StylePreviewBox.
 			Width(rightWidth).
 			Height(availableHeight).
-			Render(StyleMuted.Render("No documents matched your query.\nType to search or press Tab to cycle sources."))
+			Render(StyleMuted.Render("No documents matched your query.\nType to search, Tab to cycle sources, Ctrl+B to pin."))
 	}
 
 	mainView := lipgloss.JoinHorizontal(lipgloss.Top, leftPane, rightPane)
 	sb.WriteString(mainView + "\n\n")
 
 	// 3. Status Footer
-	stats := fmt.Sprintf(" %d matches (%.2fms) | %d indexed | Tab: filter source | ↑/↓: navigate | Enter: copy/select | Esc: exit ",
+	stats := fmt.Sprintf(" %d matches (%.2fms) | %d indexed | Tab: source | Ctrl+B: pin | Enter: select | Esc: exit ",
 		len(m.results), float64(m.searchLatency.Microseconds())/1000.0, m.engine.Count())
 	sb.WriteString(StyleStatusBar.Width(m.width).Render(stats))
 
@@ -262,8 +289,8 @@ func (m Model) View() string {
 }
 
 // RunTUI launches the interactive search interface and returns selected doc.
-func RunTUI(engine *index.Engine, initialQuery string) (*document.Document, error) {
-	p := tea.NewProgram(NewModel(engine, initialQuery), tea.WithAltScreen())
+func RunTUI(engine *index.Engine, initialQuery string, autoCopy bool) (*document.Document, error) {
+	p := tea.NewProgram(NewModel(engine, initialQuery, autoCopy), tea.WithAltScreen())
 	finalModel, err := p.Run()
 	if err != nil {
 		return nil, err
